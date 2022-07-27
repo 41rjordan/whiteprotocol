@@ -12,51 +12,6 @@ import (
 	"strings"
 )
 
-type NODE struct {
-	conn chan string
-	ip   string
-}
-
-var NODES_LIST []NODE
-var MY_IP string
-var SERVER_PORT = "4141"
-var RUN_LOCAL = false
-
-func contains(s []string, e string) bool {
-	for _, a := range s {
-		if a == e {
-			return true
-		}
-	}
-	return false
-}
-
-func removeNode(nodesptr *[]NODE, ip string) {
-	nodes := *nodesptr
-	index := -1
-	for i, node := range nodes {
-		if node.ip == ip {
-			index = i
-			break
-		}
-	}
-	if index == -1 {
-		println("WARNING - Can't remove the node because it doesn't exist in the nodes list.")
-		return
-	}
-
-	nodes[index] = nodes[len(nodes)-1]
-	*nodesptr = nodes[:len(nodes)-1]
-}
-
-func getIps(nodes *[]NODE) []string {
-	var ips []string
-	for _, node := range *nodes {
-		ips = append(ips, node.ip)
-	}
-	return ips
-}
-
 func getExternalIP() string {
 	req, err := http.Get("http://ip-api.com/json/")
 	if err != nil {
@@ -90,89 +45,85 @@ func getInternalIP() string {
 }
 
 func main() {
-	println("white protocol by 41rjordan")
+	println("White Protocol v" + VERSION + " by 41rjordan")
 
 	PORT := flag.String("port", "4141", "TCP port which will be used by node")
-	IS_ROOT := flag.Bool("rootnode", false, "Run node as rootnode (if true, node won't sync and will force-run on 4141 port)")
+	MAX_NODES_PTR := flag.Int("max-nodes", 10, "Maximum amount of nodes to be connected with")
+	IS_ROOT := flag.Bool("rootnode", false, "Run node as rootnode (if true, node won't sync)")
 	START_NODE_PTR := flag.String("force-connect", "localhost:4141", "Node will sync with preferred node first")
 	IS_LOCAL := flag.Bool("local", false, "Run node in local network (if true, node will provide local IP address to other nodes)")
+	DM_PASSWORD_PTR := flag.String("dm-password", "1234", "'print' user command password")
 	flag.Parse()
 
 	SERVER_PORT = *PORT
 	RUN_LOCAL = *IS_LOCAL
+	MAX_NODES = *MAX_NODES_PTR
+	DM_PASSWORD = *DM_PASSWORD_PTR
 
 	println("Your port is: " + SERVER_PORT + ".\nI will use this port to connect to other nodes.")
 
 	if RUN_LOCAL {
-		MY_IP = fmt.Sprintf("%s", getInternalIP())
+		MY_IP = getInternalIP()
 	} else {
-		MY_IP = fmt.Sprintf("%s", getExternalIP())
+		MY_IP = getExternalIP()
 	}
+	
 	println("Your ip is " + MY_IP + ". This ip will be used in receiving node.")
 
-	if *IS_ROOT {
-		ln, err := net.Listen("tcp", ":4141")
+	START_NODE := strings.ReplaceAll(*START_NODE_PTR, "localhost", MY_IP)
+	MY_IP = MY_IP + ":" + SERVER_PORT
+
+	ln, err := net.Listen("tcp", ":"+SERVER_PORT)
+	if err != nil {
+		panic(err)
+	}
+	defer ln.Close()
+
+	println("Listening to port " + SERVER_PORT)
+	for {
+		if !*IS_ROOT && len(NODES_LIST) == 0 {
+			println("No nodes connected, trying to connect to the preferred node...")
+
+			c := make(chan string)
+			go connection(START_NODE, c)
+			go addMe(c)
+			addNode(&NODES_LIST, c, START_NODE)
+		}
+
+		conn, err := ln.Accept()
 		if err != nil {
 			panic(err)
 		}
-		defer ln.Close()
-
-		println("Listening to port 4141")
-		for {
-			fmt.Println("Nodes list right now:", strings.Join(getIps(&NODES_LIST), ", "))
-			conn, err := ln.Accept()
-			if err != nil {
-				panic(err)
-			}
-			go handler(conn)
-		}
-	} else {
-
-		START_NODE := strings.ReplaceAll(*START_NODE_PTR, "localhost", MY_IP)
-
-		c := make(chan string)
-		go connection(START_NODE, c)
-		go addMe(c)
-		NODES_LIST = append(NODES_LIST, NODE{c, START_NODE})
-
-		ln, err := net.Listen("tcp", ":"+SERVER_PORT)
-		if err != nil {
-			panic(err)
-		}
-		defer ln.Close()
-
-		println("Listening to port " + SERVER_PORT)
-		for {
-			fmt.Println("Nodes list right now:", strings.Join(getIps(&NODES_LIST), ", "))
-			conn, err := ln.Accept()
-			if err != nil {
-				panic(err)
-			}
-			go handler(conn)
-		}
+		go handler(conn)
 	}
 }
 
 // recursive function that gets all known nodes in network
 func addMe(c chan string) {
 
-	c <- "addme"
+	c <- string(buildMessage(MY_IP, USER_AGENT, "spreadme", []string{}))
 	resp := <-c
-	msgargs := strings.Split(resp, " ")
+	msg, err := deserializeResponse(resp)
+	if err != nil {
+		return;
+	}
 
-	if msgargs[1] != "done" {
-		panic("root node returned error while receiving nodes list")
+	if msg.Response != errorCodes["done"] {
+		return;
+	}
+	if msg.ResponseData == "" {
+		return;
 	}
 
 	ips := getIps(&NODES_LIST)
 
-	for _, ip := range msgargs[2:] {
-		if contains(ips, ip) || ip == MY_IP+":"+SERVER_PORT {
+	for _, ip := range strings.Split(msg.ResponseData, " ") {
+		if contains(ips, ip) || ip == MY_IP {
 			continue
 		}
 		nodec := make(chan string)
 		go connection(ip, nodec)
-		NODES_LIST = append(NODES_LIST, NODE{nodec, ip})
+		addNode(&NODES_LIST, nodec, ip)
 		addMe(nodec)
 	}
 }
@@ -183,12 +134,16 @@ func connection(ip string, c chan string) {
 	if err != nil {
 		fmt.Println(ip, "broke the connection. Removing them from the nodes list.")
 		removeNode(&NODES_LIST, ip)
+		close(c)
 		return
 	}
 
+	connect := buildMessage(MY_IP, USER_AGENT, "connect", []string{})
+	fmt.Fprintf(conn, string(connect))
+
 	for {
 		msg := <-c
-		fmt.Fprintf(conn, MY_IP+":"+SERVER_PORT+" "+msg+"\n")
+		fmt.Fprintf(conn, msg)
 
 		resp, _ := bufio.NewReader(conn).ReadString(10) // 10 == \n
 		c <- strings.TrimSpace(resp)
@@ -196,10 +151,14 @@ func connection(ip string, c chan string) {
 }
 
 func handler(conn net.Conn) {
+	if len(NODES_LIST) >= MAX_NODES {
+		fmt.Println("Nodes limit reached. Cancelling request.")
+		return
+	}
+
 	var from_ip string
 
 	for {
-		ip_with_port := MY_IP + ":" + SERVER_PORT
 
 		// read incoming data
 		buffer := make([]byte, 1024)
@@ -207,67 +166,116 @@ func handler(conn net.Conn) {
 		if err != nil {
 			if from_ip == "" {
 				fmt.Println("Connection was broken without any packet exchange. Disabling connection handler.")
-			} else {
-				fmt.Println(from_ip, "turned down. Hope they will revive soon! Removing them from the nodes list.")
+
+			} else if isAuthenticated(&NODES_LIST, from_ip) {
 				removeNode(&NODES_LIST, from_ip)
 			}
-			fmt.Println("Nodes list right now: ", strings.Join(getIps(&NODES_LIST), ", "))
+			fmt.Println("CONNECTION STATUS --", len(NODES_LIST), "connected (", MAX_NODES, "limit )")
 			return
 		}
 
 		buffer = bytes.Trim(buffer, "\x00")
 
-		msgargs := strings.Split(strings.TrimSuffix(string(buffer), "\n"), " ")
-		from_ip = msgargs[0]
+		for _, msg := range strings.Split(string(buffer), "\n") {
 
-		switch msgargs[1] {
+			if msg == "" {
+				continue
+			}
 
-		case "addme":
-			strip := msgargs[0]
-			fmt.Println(strip, "created first connection. Spreading their ip to nodes.")
-
-			nodec := make(chan string)
-			go connection(strip, nodec)
+			message, err := deserializeMessage(msg)
+			if err != nil {
+				response := buildResponse(MY_IP, USER_AGENT, "invalid_request", "")
+				conn.Write(response)
+				continue
+			}
 
 			ips := getIps(&NODES_LIST)
+			from_ip = message.FromIP
 
-			for _, node := range NODES_LIST {
-				node.conn <- "add " + strip
+			switch message.Task {
+
+			case "connect": // actually a nop command, nodes are sending it to notify a recipient about their receiving ip
+				
+				response := buildResponse(MY_IP, USER_AGENT, "done", "")
+				conn.Write(response)
+
+			case "spreadme":
+
+				nodec := make(chan string)
+				go connection(message.FromIP, nodec)
+
+				notifyNodes(&NODES_LIST, message.FromIP)
+
+				if !contains(ips, message.FromIP) && message.FromIP != MY_IP {
+					addNode(&NODES_LIST, nodec, message.FromIP)
+				}
+
+				response := buildResponse(MY_IP, USER_AGENT, "done", strings.Join(ips, " "))
+				conn.Write(response)
+			
+			case "addme":
+
+				// checking if ip already exists in nodes
+				if contains(ips, message.FromIP) {
+					break
+				}
+				if message.FromIP == MY_IP {
+					break
+				}
+
+				c := make(chan string)
+				go connection(message.FromIP, c)
+				c <- string(buildMessage(MY_IP, USER_AGENT, "addme", []string{}))
+
+				addNode(&NODES_LIST, c, message.FromIP)
+
+				response := buildResponse(MY_IP, USER_AGENT, "done", "")
+				conn.Write(response)
+
+			case "add":
+				if !isAuthenticated(&NODES_LIST, message.FromIP) {
+					response := buildResponse(MY_IP, USER_AGENT, "unauthorized", "")
+					conn.Write(response)
+					break
+				}
+
+				// checking if ip already exists in nodes
+				if contains(ips, message.TaskArgs[0]) {
+					break
+				}
+				if message.TaskArgs[0] == MY_IP {
+					break
+				}
+
+				c := make(chan string)
+				go connection(message.TaskArgs[0], c)
+				c <- string(buildMessage(MY_IP, USER_AGENT, "addme", []string{}))
+
+				addNode(&NODES_LIST, c, message.TaskArgs[0])
+
+				response := buildResponse(MY_IP, USER_AGENT, "done", "")
+				conn.Write(response)
+			
+			case "print": // test command, based on this thing you can create an RPC or something
+
+				if message.TaskArgs[0] != DM_PASSWORD {
+					response := buildResponse(MY_IP, USER_AGENT, "wrong_password", "")
+					conn.Write(response)
+					break
+				}
+
+				fmt.Println(message.FromIP, "whispers via 'print' command:", strings.Join(message.TaskArgs[1:], " "))
+
+				response := buildResponse(MY_IP, USER_AGENT, "done", "")
+				conn.Write(response)
+
+			default:
+				response := buildResponse(MY_IP, USER_AGENT, "unknown_command", "")
+				conn.Write(response)
+
 			}
 
-			if !contains(ips, strip) && strip != ip_with_port {
-				NODES_LIST = append(NODES_LIST, NODE{nodec, strip})
-			}
-
-			conn.Write([]byte(ip_with_port + " done " + strings.Join(getIps(&NODES_LIST), " ") + "\n"))
-
-		case "add":
-			// checking if ip already exists in nodes
-			ips := getIps(&NODES_LIST)
-			if contains(ips, msgargs[2]) {
-				break
-			}
-			if msgargs[2] == ip_with_port {
-				break
-			}
-
-			c := make(chan string)
-			go connection(msgargs[2], c)
-			NODES_LIST = append(NODES_LIST, NODE{c, msgargs[2]})
-
-		case "whisper": // test function
-
-			fmt.Println(msgargs[0], "whispers:", strings.Join(msgargs[2:], " "))
-
-			for _, node := range NODES_LIST {
-				node.conn <- "whisper " + strings.Join(msgargs[2:], " ")
-			}
-
-		default:
-			conn.Write([]byte(ip_with_port + " err unknown_command\n"))
-
+			fmt.Println("CONNECTION STATUS --", len(NODES_LIST), "connected (", MAX_NODES, "limit )")
 		}
-
-		fmt.Println("Nodes list right now: ", strings.Join(getIps(&NODES_LIST), ", "))
 	}
 }
