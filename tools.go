@@ -9,7 +9,7 @@ func contains(s []string, e string) bool {
 	return false
 }
 
-func addNode(nodesptr *[]NODE, c chan string, ip string) {
+func addNode(nodesptr *[]NODE, c chan []byte, ip string) {
 	NL_MUTEX.Lock()
 	*nodesptr = append(*nodesptr, NODE{c, ip})
 	NL_MUTEX.Unlock()
@@ -38,7 +38,7 @@ func removeNode(nodesptr *[]NODE, ip string) {
 func notifyNodes(nodesptr *[]NODE, ip string) {
 	NL_MUTEX.Lock()
 	for _, node := range *nodesptr {
-		msg := string(buildMessage(MY_IP, USER_AGENT, "add", []string{ip}))
+		msg := buildMessage(MY_IP, USER_AGENT, "add", []string{ip})
 		node.Conn <- msg
 	}
 	for _, node := range *nodesptr {

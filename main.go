@@ -45,7 +45,9 @@ func getInternalIP() string {
 }
 
 func main() {
+	fmt.Print("\033[H\033[2J")
 	println("White Protocol v" + VERSION + " by 41rjordan")
+	println(USER_AGENT)
 
 	PORT := flag.String("port", "4141", "TCP port which will be used by node")
 	MAX_NODES_PTR := flag.Int("max-nodes", 10, "Maximum amount of nodes to be connected with")
@@ -79,15 +81,22 @@ func main() {
 	}
 	defer ln.Close()
 
+	if !fileExists("keypair") {
+		fmt.Println("Seems it's the first run! Creating new P2P keypair.")
+		createMessageKeypair()
+	}
+
 	println("Listening to port " + SERVER_PORT)
 	for {
 		if !*IS_ROOT && len(NODES_LIST) == 0 {
 			println("No nodes connected, trying to connect to the preferred node...")
 
-			c := make(chan string)
-			go connection(START_NODE, c)
+			c := make(chan []byte)
+			go connection(START_NODE, c, false)
 			go addMe(c)
 			addNode(&NODES_LIST, c, START_NODE)
+
+			fmt.Println("CONNECTION STATUS --", len(NODES_LIST), "connected (", MAX_NODES, "limit )")
 		}
 
 		conn, err := ln.Accept()
@@ -99,11 +108,11 @@ func main() {
 }
 
 // recursive function that gets all known nodes in network
-func addMe(c chan string) {
+func addMe(c chan []byte) {
 
-	c <- string(buildMessage(MY_IP, USER_AGENT, "spreadme", []string{}))
+	c <- buildMessage(MY_IP, USER_AGENT, "spreadme", []string{})
 	resp := <-c
-	msg, err := deserializeResponse(resp)
+	msg, err := deserializeResponse(resp[32:])
 	if err != nil {
 		return;
 	}
@@ -121,14 +130,19 @@ func addMe(c chan string) {
 		if contains(ips, ip) || ip == MY_IP {
 			continue
 		}
-		nodec := make(chan string)
-		go connection(ip, nodec)
+		nodec := make(chan []byte)
+		go connection(ip, nodec, false)
 		addNode(&NODES_LIST, nodec, ip)
 		addMe(nodec)
 	}
 }
 
-func connection(ip string, c chan string) {
+func connection(ip string, c chan []byte, verifyConnection bool) { // if verifyConnection is true, function will wait for public key to verify with
+
+	var publicKey []byte
+	if verifyConnection {
+		publicKey = <-c
+	}
 
 	conn, err := net.Dial("tcp", ip)
 	if err != nil {
@@ -140,13 +154,23 @@ func connection(ip string, c chan string) {
 
 	connect := buildMessage(MY_IP, USER_AGENT, "connect", []string{})
 	fmt.Fprintf(conn, string(connect))
+	if verifyConnection {
+		resp, _ := bufio.NewReader(conn).ReadBytes(10)
+
+		if !verifyMessageSignature(resp, publicKey) { // currently unused
+			fmt.Println("[WARNING] Message from", ip, "has invalid signature. Most likely, either you or they were MITMed.\n[WARNING] Removing them from the nodes list. If this warning will appear again with different node,\n[WARNING] scan yourself with an antivirus.")
+			removeNode(&NODES_LIST, ip)
+			close(c)
+			return
+		}
+	}
 
 	for {
 		msg := <-c
-		fmt.Fprintf(conn, msg)
+		fmt.Fprintf(conn, string(msg))
 
-		resp, _ := bufio.NewReader(conn).ReadString(10) // 10 == \n
-		c <- strings.TrimSpace(resp)
+		resp, _ := bufio.NewReader(conn).ReadBytes(10) // 10 == \n
+		c <- resp
 	}
 }
 
@@ -161,7 +185,7 @@ func handler(conn net.Conn) {
 	for {
 
 		// read incoming data
-		buffer := make([]byte, 1024)
+		buffer := make([]byte, 65536)
 		_, err := conn.Read(buffer)
 		if err != nil {
 			if from_ip == "" {
@@ -196,13 +220,17 @@ func handler(conn net.Conn) {
 
 			case "connect": // actually a nop command, nodes are sending it to notify a recipient about their receiving ip
 				
-				response := buildResponse(MY_IP, USER_AGENT, "done", "")
+				keypair, err := getMessageKeypair()
+				if err != nil {
+					panic(err)
+				}
+				response := buildResponse(MY_IP, USER_AGENT, "done", keypair.PublicKey)
 				conn.Write(response)
 
 			case "spreadme":
 
-				nodec := make(chan string)
-				go connection(message.FromIP, nodec)
+				nodec := make(chan []byte)
+				go connection(message.FromIP, nodec, false)
 
 				notifyNodes(&NODES_LIST, message.FromIP)
 
@@ -223,9 +251,9 @@ func handler(conn net.Conn) {
 					break
 				}
 
-				c := make(chan string)
-				go connection(message.FromIP, c)
-				c <- string(buildMessage(MY_IP, USER_AGENT, "addme", []string{}))
+				c := make(chan []byte)
+				go connection(message.FromIP, c, false)
+				c <- buildMessage(MY_IP, USER_AGENT, "addme", []string{})
 
 				addNode(&NODES_LIST, c, message.FromIP)
 
@@ -247,9 +275,9 @@ func handler(conn net.Conn) {
 					break
 				}
 
-				c := make(chan string)
-				go connection(message.TaskArgs[0], c)
-				c <- string(buildMessage(MY_IP, USER_AGENT, "addme", []string{}))
+				c := make(chan []byte)
+				go connection(message.TaskArgs[0], c, false)
+				c <- buildMessage(MY_IP, USER_AGENT, "addme", []string{})
 
 				addNode(&NODES_LIST, c, message.TaskArgs[0])
 

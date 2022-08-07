@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"runtime"
 )
 
 // Response error codes
@@ -31,12 +32,12 @@ var (
 )
 
 const (
-	USER_AGENT = "whiteprotocol:whiteprotocol/v" + VERSION // Format: whiteprotocol:<client>/<version with v prefix>. Official client whiteprotocol is eponymous to the protocol "whiteprotocol"
-	VERSION = "0.0.3"
+	USER_AGENT = "whiteprotocol:whiteprotocol/v" + VERSION + "/" + runtime.GOOS // Format: whiteprotocol:<client>/<version with v prefix>. Official client whiteprotocol is eponymous to the protocol "whiteprotocol"
+	VERSION = "0.0.4"
 )
 
 type NODE struct {
-	Conn chan string
+	Conn chan []byte
 	IP   string
 }
 
@@ -54,4 +55,9 @@ type RESPONSE struct {
 
 	Response 	int
 	ResponseData 	string
+}
+
+type MESSAGEKEYPAIR struct {
+	PublicKey	string
+	PrivateKey	string
 }
