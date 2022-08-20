@@ -1,6 +1,8 @@
 # whiteprotocol
 Terribly simple distributed network
 
+**I'm not going to update this project because i'm modifying it to something more big. However, feel free to use it.**
+
 This is simple program, which can connect to other nodes and form nodes chain, that is, distributed network.&nbsp;Works similar to BitTorrent.
 
 Except of the connection itself, it supports one command - "print". This command prints text message to node by password.&nbsp;This is test function
